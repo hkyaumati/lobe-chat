@@ -1,6 +1,6 @@
 'use client';
 
-import { Flexbox, FormItem } from '@lobehub/ui';
+import { Alert, Flexbox, FormItem } from '@lobehub/ui';
 import { createStaticStyles } from 'antd-style';
 import { memo } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -47,11 +47,12 @@ interface WechatConnectedInfoProps {
     applicationId: string;
     credentials: Record<string, string>;
   };
+  disabled?: boolean;
   onQrAuthenticated?: (credentials: { botId: string; botToken: string; userId: string }) => void;
 }
 
 const WechatConnectedInfo = memo<WechatConnectedInfoProps>(
-  ({ currentConfig, onQrAuthenticated }) => {
+  ({ currentConfig, disabled, onQrAuthenticated }) => {
     const { t: _t } = useTranslation('agent');
     const t = _t as (key: string) => string;
 
@@ -72,11 +73,18 @@ const WechatConnectedInfo = memo<WechatConnectedInfoProps>(
             <QrCodeAuth
               buttonLabel={t('channel.wechatRebind')}
               buttonType="default"
+              disabled={disabled}
               showTips={false}
               onAuthenticated={onQrAuthenticated}
             />
           )}
         </div>
+        <Alert
+          showIcon
+          message={t('channel.wechatIdleNotice')}
+          style={{ marginBlockEnd: 16 }}
+          type="info"
+        />
         {shouldShowApplicationId && (
           <ReadOnlyField
             description={t('channel.applicationIdHint')}
@@ -85,7 +93,7 @@ const WechatConnectedInfo = memo<WechatConnectedInfoProps>(
             value={currentConfig.applicationId}
           />
         )}
-        {process.env.NODE_ENV === 'development' && (
+        {__DEV__ && (
           <>
             <ReadOnlyField
               description={t('channel.wechatBotIdHint')}

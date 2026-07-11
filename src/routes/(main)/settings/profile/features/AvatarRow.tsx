@@ -1,10 +1,9 @@
 'use client';
 
-import { LoadingOutlined } from '@ant-design/icons';
-import { Flexbox, Icon, Text } from '@lobehub/ui';
-import { Spin, Upload } from 'antd';
+import { Icon } from '@lobehub/ui';
+import { Upload } from 'antd';
 import { createStaticStyles, cssVar } from 'antd-style';
-import { PencilIcon } from 'lucide-react';
+import { Loader2Icon, PencilIcon } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
@@ -15,7 +14,7 @@ import { authSelectors } from '@/store/user/selectors';
 import { imageToBase64 } from '@/utils/imageToBase64';
 import { createUploadImageHandler } from '@/utils/uploadFIle';
 
-import { labelStyle, rowStyle } from './ProfileRow';
+import ProfileRow from './ProfileRow';
 
 const styles = createStaticStyles(({ css }) => ({
   overlay: css`
@@ -48,11 +47,7 @@ const styles = createStaticStyles(({ css }) => ({
   `,
 }));
 
-interface AvatarRowProps {
-  mobile?: boolean;
-}
-
-const AvatarRow = ({ mobile }: AvatarRowProps) => {
+const AvatarRow = () => {
   const { t } = useTranslation('auth');
   const isLogin = useUserStore(authSelectors.isLogin);
   const updateAvatar = useUserStore((s) => s.updateAvatar);
@@ -91,36 +86,26 @@ const AvatarRow = ({ mobile }: AvatarRowProps) => {
 
   const avatarContent = canUpload ? (
     <Upload beforeUpload={handleUploadAvatar} itemRender={() => void 0} maxCount={1}>
-      <Spin indicator={<LoadingOutlined spin />} spinning={uploading}>
-        <div className={styles.wrapper}>
-          <UserAvatar size={40} />
-          <div className={`${styles.overlay} avatar-edit-overlay`}>
-            <Icon color={cssVar.colorTextLightSolid} icon={PencilIcon} size={16} />
-          </div>
+      <div className={styles.wrapper}>
+        <UserAvatar size={40} />
+        <div
+          className={`${styles.overlay} avatar-edit-overlay`}
+          style={uploading ? { opacity: 1 } : undefined}
+        >
+          <Icon
+            color={cssVar.colorTextLightSolid}
+            icon={uploading ? Loader2Icon : PencilIcon}
+            size={16}
+            spin={uploading}
+          />
         </div>
-      </Spin>
+      </div>
     </Upload>
   ) : (
     <UserAvatar size={40} />
   );
 
-  if (mobile) {
-    return (
-      <Flexbox horizontal align="center" gap={12} justify="space-between" style={rowStyle}>
-        <Text strong>{t('profile.avatar')}</Text>
-        {avatarContent}
-      </Flexbox>
-    );
-  }
-
-  return (
-    <Flexbox horizontal align="center" gap={24} style={rowStyle}>
-      <Text style={labelStyle}>{t('profile.avatar')}</Text>
-      <Flexbox align="flex-end" style={{ flex: 1 }}>
-        {avatarContent}
-      </Flexbox>
-    </Flexbox>
-  );
+  return <ProfileRow action={avatarContent} label={t('profile.avatar')} />;
 };
 
 export default AvatarRow;

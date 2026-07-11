@@ -3,19 +3,26 @@ import { isDesktop } from '@lobechat/const';
 import { type BuiltinSkill } from '@lobechat/types';
 
 export interface BuiltinSkillFilterContext {
-  isDesktop: boolean;
+  /**
+   * Whether the current run can execute commands on a local device. Server-side
+   * callers must derive this from the run's execution plan (`activeDeviceId`
+   * presence) — the compile-time `isDesktop` constant is always false there.
+   */
+  canExecuteOnDevice: boolean;
 }
 
-const DESKTOP_ONLY_BUILTIN_SKILLS = new Set([AgentBrowserIdentifier]);
+const DEVICE_ONLY_BUILTIN_SKILLS = new Set([AgentBrowserIdentifier]);
+const USER_HIDDEN_BUILTIN_SKILLS = new Set(['task']);
 
+// Client default: the desktop app is itself the execution device.
 const DEFAULT_CONTEXT: BuiltinSkillFilterContext = {
-  isDesktop,
+  canExecuteOnDevice: isDesktop,
 };
 
 const resolveBuiltinSkillFilterContext = (
   context: BuiltinSkillFilterContext = DEFAULT_CONTEXT,
 ): BuiltinSkillFilterContext => ({
-  isDesktop: context.isDesktop ?? DEFAULT_CONTEXT.isDesktop,
+  canExecuteOnDevice: context.canExecuteOnDevice ?? DEFAULT_CONTEXT.canExecuteOnDevice,
 });
 
 export const shouldEnableBuiltinSkill = (
@@ -24,10 +31,9 @@ export const shouldEnableBuiltinSkill = (
 ): boolean => {
   const resolvedContext = resolveBuiltinSkillFilterContext(context);
 
-  if (DESKTOP_ONLY_BUILTIN_SKILLS.has(skillId)) {
-    if (!resolvedContext.isDesktop) return false;
-    return true;
-  }
+  if (USER_HIDDEN_BUILTIN_SKILLS.has(skillId)) return false;
+
+  if (DEVICE_ONLY_BUILTIN_SKILLS.has(skillId)) return resolvedContext.canExecuteOnDevice;
 
   return true;
 };
@@ -38,3 +44,5 @@ export const filterBuiltinSkills = (
 ): BuiltinSkill[] => {
   return skills.filter((skill) => shouldEnableBuiltinSkill(skill.identifier, context));
 };
+
+export { USER_HIDDEN_BUILTIN_SKILLS };

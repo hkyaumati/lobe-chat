@@ -1,39 +1,54 @@
-import { Accordion, AccordionItem, Flexbox, Text } from '@lobehub/ui';
+import { Flexbox } from '@lobehub/ui';
 import { memo } from 'react';
-import { useTranslation } from 'react-i18next';
+
+import { useEffectiveWorkingDirectory } from '@/hooks/useEffectiveWorkingDirectory';
+import { useAgentStore } from '@/store/agent';
+import { agentSelectors } from '@/store/agent/selectors';
 
 import AgentDocumentsGroup from './AgentDocumentsGroup';
+import SkillsGroup from './SkillsGroup';
 
 interface ResourcesSectionProps {
-  onSelectDocument: (id: string | null) => void;
-  selectedDocumentId: string | null;
+  /** Bound remote device id (device mode); skills are then scanned over RPC. */
+  deviceId?: string;
+  /**
+   * Whether this pane is actually visible (panel open + resources tab active).
+   * Gates the agent-document fetch so a collapsed sidebar doesn't pull the full
+   * list on conversation enter.
+   */
+  enabled?: boolean;
 }
 
-const ResourcesSection = memo<ResourcesSectionProps>(({ onSelectDocument, selectedDocumentId }) => {
-  const { t } = useTranslation('chat');
+const ResourcesSection = memo<ResourcesSectionProps>(({ deviceId, enabled = true }) => {
+  const isHetero = useAgentStore(agentSelectors.isCurrentAgentHeterogeneous);
+  const activeAgentId = useAgentStore((s) => s.activeAgentId);
+  // Resolve the cwd the same way the runtime bar / WorkingSidebar do
+  // (`useEffectiveWorkingDirectory`). The old `topicCwd || agentCwd` pattern
+  // missed `workingDirByDevice[deviceId]` / `device.defaultCwd`, so a
+  // device-bound agent resolved to `undefined` here and the skills fetch never
+  // fired even though `deviceId` was set.
+  const workingDirectory = useEffectiveWorkingDirectory(activeAgentId);
 
   return (
-    <Flexbox data-testid="workspace-resources" padding={16}>
-      <Accordion defaultExpandedKeys={['resources']} gap={0}>
-        <AccordionItem
-          itemKey={'resources'}
-          paddingBlock={2}
-          paddingInline={6}
-          title={<Text strong>{t('workingPanel.resources')}</Text>}
-          styles={{
-            header: {
-              width: 'fit-content',
-            },
-          }}
-        >
-          <Flexbox paddingBlock={8}>
-            <AgentDocumentsGroup
-              selectedDocumentId={selectedDocumentId}
-              onSelectDocument={onSelectDocument}
-            />
-          </Flexbox>
-        </AccordionItem>
-      </Accordion>
+    <Flexbox
+      data-testid="workspace-resources"
+      flex={1}
+      gap={16}
+      paddingBlock={8}
+      paddingInline={'8px 12px'}
+      style={{ minHeight: 0 }}
+    >
+      {isHetero && workingDirectory && (
+        <SkillsGroup deviceId={deviceId} workingDirectory={workingDirectory} />
+      )}
+      {!isHetero && (
+        <AgentDocumentsGroup
+          deviceId={deviceId}
+          enabled={enabled}
+          style={{ flex: 1, minHeight: 0 }}
+          workingDirectory={workingDirectory}
+        />
+      )}
     </Flexbox>
   );
 });

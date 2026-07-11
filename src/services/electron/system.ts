@@ -36,8 +36,20 @@ class ElectronSystemService {
     return this.ipc.windows.isWindowMaximized();
   }
 
+  async isWindowFullScreen(): Promise<boolean> {
+    return this.ipc.windows.isWindowFullScreen();
+  }
+
   async minimizeWindow(): Promise<void> {
     return this.ipc.windows.minimizeWindow();
+  }
+
+  async setWindowAlwaysOnTop(flag: boolean): Promise<void> {
+    return this.ipc.windows.setWindowAlwaysOnTop(flag);
+  }
+
+  async isWindowAlwaysOnTop(): Promise<boolean> {
+    return this.ipc.windows.isWindowAlwaysOnTop();
   }
 
   async setWindowSize(params: WindowSizeParams): Promise<void> {

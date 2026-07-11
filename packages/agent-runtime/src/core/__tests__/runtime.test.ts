@@ -338,6 +338,107 @@ describe('AgentRuntime', () => {
           'Tool not found: unknown_tool',
         );
       });
+
+      // A resume that carries a seeded assistant placeholder must stash it on
+      // state so the follow-up call_llm reuses it — otherwise the placeholder is
+      // orphaned as an empty assistant sibling. See the tools-activator op-split.
+      it('should stash the resume-seeded assistantMessageId as pendingAssistantMessageId', async () => {
+        const agent = new MockAgent();
+        agent.tools = {
+          calculator: vi.fn().mockResolvedValue({ result: 42 }),
+        };
+
+        const runtime = new AgentRuntime(agent);
+        const state = AgentRuntime.createInitialState({ operationId: 'test-session' });
+
+        const result = await runtime.step(state, {
+          operationId: 'test-session',
+          phase: 'human_approved_tool',
+          payload: {
+            approvedToolCall: {
+              id: 'call_123',
+              apiName: 'calculator',
+              identifier: 'calculator',
+              arguments: '{"expression": "2+2"}',
+              type: 'default',
+            },
+            assistantMessageId: 'msg_seeded_placeholder',
+            parentMessageId: 'tool-msg-1',
+            skipCreateToolMessage: true,
+          },
+          session: {
+            sessionId: 'test-session',
+            messageCount: 0,
+            status: 'idle',
+            stepCount: 0,
+          },
+        } as any);
+
+        expect(result.newState.pendingAssistantMessageId).toBe('msg_seeded_placeholder');
+      });
+
+      it('should stash a tool_result-seeded assistantMessageId as pendingAssistantMessageId', async () => {
+        const agent = new MockAgent();
+        agent.runner = vi.fn(async (_context: AgentRuntimeContext, state: AgentState) => {
+          expect(state.pendingAssistantMessageId).toBe('msg_seeded_placeholder');
+          return { type: 'finish' as const, reason: 'completed' as const, reasonDetail: 'Done' };
+        });
+
+        const runtime = new AgentRuntime(agent);
+        const state = AgentRuntime.createInitialState({ operationId: 'test-session' });
+
+        const result = await runtime.step(
+          state,
+          createTestContext('tool_result', {
+            assistantMessageId: 'msg_seeded_placeholder',
+            parentMessageId: 'tool-msg-1',
+          }),
+        );
+
+        expect(agent.runner).toHaveBeenCalled();
+        expect(result.newState.pendingAssistantMessageId).toBe('msg_seeded_placeholder');
+      });
+
+      it('should allow payload-less tool_result contexts to reach the agent runner', async () => {
+        const agent = new MockAgent();
+        agent.runner = vi.fn(async () => ({
+          type: 'finish' as const,
+          reason: 'completed' as const,
+          reasonDetail: 'Done',
+        }));
+
+        const runtime = new AgentRuntime(agent);
+        const state = AgentRuntime.createInitialState({ operationId: 'test-session' });
+
+        await expect(runtime.step(state, createTestContext('tool_result'))).resolves.toBeDefined();
+        expect(agent.runner).toHaveBeenCalled();
+      });
+
+      // Consume-once: once a call_llm step runs it has filled (or replaced) the
+      // seeded placeholder, so the seed must be cleared before the next step —
+      // otherwise a later assistant turn would reuse the id and overwrite it.
+      it('should clear pendingAssistantMessageId after a call_llm step', async () => {
+        const agent = new MockAgent();
+        const callLlmExecutor = vi.fn(async (_instruction: any, state: AgentState) => ({
+          events: [],
+          newState: structuredClone(state),
+        }));
+
+        const runtime = new AgentRuntime(agent, {
+          executors: { call_llm: callLlmExecutor },
+        });
+        const state = AgentRuntime.createInitialState({ operationId: 'test-session' });
+        state.pendingAssistantMessageId = 'msg_seeded_placeholder';
+
+        // MockAgent.runner returns a call_llm instruction for the tool_result phase.
+        const result = await runtime.step(
+          state,
+          createTestContext('tool_result', { parentMessageId: 'tool-msg-1' }),
+        );
+
+        expect(callLlmExecutor).toHaveBeenCalled();
+        expect(result.newState.pendingAssistantMessageId).toBeUndefined();
+      });
     });
 
     describe('human interaction executors', () => {
@@ -1172,6 +1273,110 @@ describe('AgentRuntime', () => {
       expect(result.nextContext?.payload).toHaveProperty('toolCount', 3);
     });
 
+    it('should resolve blocked tools and continue without waiting for human approval', async () => {
+      class BlockedToolAgent implements Agent {
+        async runner(context: AgentRuntimeContext, _state: AgentState) {
+          if (context.phase === 'user_input') {
+            return {
+              payload: {
+                parentMessageId: 'assistant-1',
+                toolsCalling: [
+                  {
+                    apiName: 'bash',
+                    arguments: '{"command":"rm -rf /"}',
+                    id: 'call_blocked',
+                    identifier: 'bash',
+                    type: 'builtin' as const,
+                  },
+                ],
+              },
+              type: 'resolve_blocked_tools' as const,
+            };
+          }
+
+          return { reason: 'completed' as const, type: 'finish' as const };
+        }
+      }
+
+      const runtime = new AgentRuntime(new BlockedToolAgent());
+      const state = AgentRuntime.createInitialState({
+        messages: [{ content: 'Try a blocked tool', role: 'user' }],
+        operationId: 'blocked-tool-test',
+      });
+
+      const result = await runtime.step(state);
+
+      expect(result.newState.status).toBe('running');
+      expect(result.events).toEqual([
+        {
+          id: 'call_blocked',
+          result: {
+            content: 'Blocked by security/privacy.',
+            success: false,
+          },
+          type: 'tool_result',
+        },
+      ]);
+      expect(result.nextContext?.phase).toBe('tools_batch_result');
+      expect(result.nextContext?.payload).toMatchObject({
+        parentMessageId: 'assistant-1',
+        toolCount: 1,
+      });
+    });
+
+    // Regression test for Gemini 3 thoughtSignature must survive the
+    // OpenAI ToolsCalling -> ChatToolPayload normalization in call_tools_batch,
+    // otherwise Gemini 3 400s on the second tool_call turn.
+    it('should preserve thoughtSignature when normalizing call_tools_batch ToolsCalling payload', async () => {
+      const signature = 'EoMYCoAYA_gemini3_thought_signature_fixture';
+
+      class ThoughtSignatureAgent implements Agent {
+        tools = {
+          gemini_tool: vi.fn().mockResolvedValue({ result: 'ok' }),
+        };
+
+        async runner(context: AgentRuntimeContext, _state: AgentState) {
+          if (context.phase === 'user_input') {
+            return {
+              payload: [
+                {
+                  function: { arguments: '{}', name: 'gemini_tool' },
+                  id: 'call_gemini_1',
+                  thoughtSignature: signature,
+                  type: 'function' as const,
+                },
+              ],
+              type: 'call_tools_batch' as const,
+            };
+          }
+          return { type: 'finish' as const, reason: 'completed' as const };
+        }
+      }
+
+      // Intercept normalized call_tools_batch to capture the ChatToolPayload handed downstream.
+      let capturedToolsCalling: ChatToolPayload[] | undefined;
+      const agent = new ThoughtSignatureAgent();
+      const runtime = new AgentRuntime(agent, {
+        executors: {
+          call_tools_batch: async (instruction: any, state: AgentState) => {
+            capturedToolsCalling = instruction.payload.toolsCalling;
+            return { events: [], newState: state };
+          },
+        },
+      });
+
+      const state = AgentRuntime.createInitialState({
+        operationId: 'thought-signature-test',
+        messages: [{ role: 'user', content: 'Call Gemini 3 tool' }],
+      });
+
+      await runtime.step(state);
+
+      expect(capturedToolsCalling).toHaveLength(1);
+      expect(capturedToolsCalling![0].thoughtSignature).toBe(signature);
+      expect(capturedToolsCalling![0].apiName).toBe('gemini_tool');
+    });
+
     it('should support agent returning instruction array', async () => {
       // Agent that returns array of instructions
       class ArrayReturnAgent implements Agent {
@@ -1378,9 +1583,9 @@ describe('AgentRuntime', () => {
     });
   });
 
-  describe('Multi-Round Batch Tool Execution (LOBE-1657)', () => {
+  describe('Multi-Round Batch Tool Execution ()', () => {
     /**
-     * This test verifies the fix for LOBE-1657:
+     * This test verifies the fix for
      * When executing multiple rounds of batch tool calls, tool messages should not be duplicated.
      *
      * Root cause: The mergeToolResults method was extracting ALL tool messages from each result,

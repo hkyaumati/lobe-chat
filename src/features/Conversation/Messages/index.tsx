@@ -9,20 +9,26 @@ import { memo, Suspense, useCallback } from 'react';
 
 import BubblesLoading from '@/components/BubblesLoading';
 import SafeBoundary from '@/components/ErrorBoundary';
+import { useUserStore } from '@/store/user';
+import { labPreferSelectors } from '@/store/user/selectors';
 
 import History from '../components/History';
 import { useChatItemContextMenu } from '../hooks/useChatItemContextMenu';
+import MessageSelectionWrapper from '../MessageForward/MessageSelectionWrapper';
 import { dataSelectors, messageStateSelectors, useConversationStore } from '../store';
 import AgentCouncilMessage from './AgentCouncil';
 import AssistantMessage from './Assistant';
 import AssistantGroupMessage from './AssistantGroup';
+import type { WorkflowExpandLevelDefault } from './AssistantGroup/components/WorkflowCollapse';
+import TextSelectionActionLayer from './components/TextSelectionActionLayer';
 import CompressedGroupMessage from './CompressedGroup';
 import GroupTasksMessage from './GroupTasks';
-import SupervisorMessage from './Supervisor';
 import TaskMessage from './Task';
+import TaskCallbackMessage from './TaskCallback';
 import TasksMessage from './Tasks';
 import ToolMessage from './Tool';
 import UserMessage from './User';
+import VerifyMessage from './Verify';
 
 const prefixCls = 'ant';
 
@@ -41,10 +47,11 @@ const styles = createStaticStyles(({ css }) => ({
 
 export interface MessageItemProps {
   className?: string;
-  defaultWorkflowExpanded?: boolean;
+  defaultWorkflowExpandLevel?: WorkflowExpandLevelDefault;
   disableEditing?: boolean;
   enableHistoryDivider?: boolean;
   endRender?: ReactNode;
+  footerRender?: ReactNode;
   id: string;
   index: number;
   inPortalThread?: boolean;
@@ -54,16 +61,20 @@ export interface MessageItemProps {
 const MessageItem = memo<MessageItemProps>(
   ({
     className,
-    defaultWorkflowExpanded,
+    defaultWorkflowExpandLevel,
     enableHistoryDivider,
     id,
     endRender,
+    footerRender,
     disableEditing,
     inPortalThread = false,
     index,
     isLatestItem,
   }) => {
     const topic = useConversationStore((s) => s.context.topicId);
+    const enableMessageTextSelectionActions = useUserStore(
+      labPreferSelectors.enableMessageTextSelectionActions,
+    );
 
     // Get message from ConversationStore
     const message = useConversationStore(dataSelectors.getDisplayMessageById(id), isEqual);
@@ -80,6 +91,14 @@ const MessageItem = memo<MessageItemProps>(
       inPortalThread,
       topic,
     });
+    // Supervisor renders through AssistantGroupMessage, which draws footerRender
+    // itself — keep it in the injected-footer set so the outer wrapper doesn't
+    // render the same anchored footer (e.g. AgentSignalReceiptList) a second time.
+    const shouldInjectFooter =
+      role === 'assistant' || role === 'assistantGroup' || role === 'supervisor';
+    const supportsTextSelectionActions =
+      role === 'user' || role === 'assistant' || role === 'assistantGroup';
+    const shouldDimCreatingMessage = isMessageCreating && role !== 'user';
 
     const onContextMenu = useCallback(
       async (event: MouseEvent<HTMLDivElement>) => {
@@ -121,6 +140,7 @@ const MessageItem = memo<MessageItemProps>(
           return (
             <AssistantMessage
               disableEditing={disableEditing}
+              footerRender={footerRender}
               id={id}
               index={index}
               isLatestItem={isLatestItem}
@@ -131,8 +151,9 @@ const MessageItem = memo<MessageItemProps>(
         case 'assistantGroup': {
           return (
             <AssistantGroupMessage
-              defaultWorkflowExpanded={defaultWorkflowExpanded}
+              defaultWorkflowExpandLevel={defaultWorkflowExpandLevel}
               disableEditing={disableEditing}
+              footerRender={footerRender}
               id={id}
               index={index}
               isLatestItem={isLatestItem}
@@ -141,9 +162,15 @@ const MessageItem = memo<MessageItemProps>(
         }
 
         case 'supervisor': {
+          // Supervisor messages render through the rich AssistantGroup component
+          // (workflow collapse / taskCompletions / signalCallbacks) — it swaps in
+          // the group's avatar + name + 主管 badge when the message is a supervisor
+          // turn. Keeps a single code path instead of a thinner duplicate.
           return (
-            <SupervisorMessage
+            <AssistantGroupMessage
+              defaultWorkflowExpandLevel={defaultWorkflowExpandLevel}
               disableEditing={disableEditing}
+              footerRender={footerRender}
               id={id}
               index={index}
               isLatestItem={isLatestItem}
@@ -162,11 +189,11 @@ const MessageItem = memo<MessageItemProps>(
           );
         }
         case 'tasks': {
-          return <TasksMessage id={id} index={index} />;
+          return <TasksMessage id={id} />;
         }
 
         case 'groupTasks': {
-          return <GroupTasksMessage id={id} index={index} />;
+          return <GroupTasksMessage id={id} />;
         }
 
         case 'agentCouncil': {
@@ -180,24 +207,46 @@ const MessageItem = memo<MessageItemProps>(
         case 'tool': {
           return <ToolMessage disableEditing={disableEditing} id={id} index={index} />;
         }
+
+        case 'verify': {
+          return <VerifyMessage id={id} index={index} />;
+        }
+
+        case 'taskCallback': {
+          return <TaskCallbackMessage id={id} index={index} />;
+        }
       }
 
       return null;
-    }, [role, defaultWorkflowExpanded, disableEditing, id, index, isLatestItem]);
+    }, [role, defaultWorkflowExpandLevel, disableEditing, footerRender, id, index, isLatestItem]);
 
     if (!role) return;
+
+    const content = (
+      <SafeBoundary variant="alert">
+        <Suspense fallback={<BubblesLoading />}>{renderContent()}</Suspense>
+      </SafeBoundary>
+    );
+
+    const selectableContent =
+      enableMessageTextSelectionActions && supportsTextSelectionActions ? (
+        <TextSelectionActionLayer>{content}</TextSelectionActionLayer>
+      ) : (
+        content
+      );
 
     return (
       <>
         {enableHistoryDivider && <History />}
         <Flexbox
-          className={cx(styles.message, className, isMessageCreating && styles.loading)}
+          className={cx(styles.message, className, shouldDimCreatingMessage && styles.loading)}
           data-index={index}
           onContextMenu={onContextMenu}
         >
-          <SafeBoundary variant="alert">
-            <Suspense fallback={<BubblesLoading />}>{renderContent()}</Suspense>
-          </SafeBoundary>
+          <MessageSelectionWrapper id={id} role={role}>
+            {selectableContent}
+          </MessageSelectionWrapper>
+          {!shouldInjectFooter && footerRender}
           {endRender}
         </Flexbox>
       </>

@@ -1,4 +1,4 @@
-import type { CheckpointConfig } from '@lobechat/types';
+import type { CheckpointConfig, TaskAutomationMode, TaskStatus } from '@lobechat/types';
 
 import { lambdaClient } from '@/libs/trpc/client';
 
@@ -13,8 +13,11 @@ class TaskService {
     assigneeAgentId?: string;
     limit?: number;
     offset?: number;
+    parentIdentifier?: string;
     parentTaskId?: string | null;
-    status?: string;
+    priorities?: number[];
+    statuses?: TaskStatus[];
+    visibility?: 'private' | 'public';
   }) => lambdaClient.task.list.query(params);
 
   groupList = async (params: {
@@ -26,6 +29,7 @@ class TaskService {
       statuses: string[];
     }>;
     parentTaskId?: string | null;
+    visibility?: 'private' | 'public';
   }) => lambdaClient.task.groupList.query(params);
 
   getSubtasks = async (id: string) => lambdaClient.task.getSubtasks.query({ id });
@@ -42,34 +46,53 @@ class TaskService {
 
   getReview = async (id: string) => lambdaClient.task.getReview.query({ id });
 
+  getVerifyConfig = async (id: string) => lambdaClient.task.getVerifyConfig.query({ id });
+
   // ── Mutations ──
 
   create = async (params: {
     assigneeAgentId?: string;
     assigneeUserId?: string;
+    automationMode?: TaskAutomationMode;
+    createdByAgentId?: string;
     description?: string;
+    editorData?: unknown;
     identifierPrefix?: string;
     instruction: string;
     name?: string;
     parentTaskId?: string;
     priority?: number;
+    schedulePattern?: string;
+    scheduleTimezone?: string;
+    visibility?: 'private' | 'public';
   }) => lambdaClient.task.create.mutate(params);
+
+  updateVisibility = async (id: string, visibility: 'private' | 'public') =>
+    lambdaClient.task.updateVisibility.mutate({ id, visibility });
 
   update = async (
     id: string,
     data: {
       assigneeAgentId?: string | null;
       assigneeUserId?: string | null;
+      // Automation mode; null = no automation
+      automationMode?: TaskAutomationMode | null;
       config?: Record<string, unknown>;
       context?: Record<string, unknown>;
       description?: string;
+      editorData?: unknown;
       // heartbeatInterval: periodic execution interval (seconds), controls how often the task auto-executes
       heartbeatInterval?: number;
       // heartbeatTimeout: watchdog timeout threshold (seconds), used to detect if a running task is stuck
       heartbeatTimeout?: number | null;
       instruction?: string;
       name?: string;
+      parentTaskId?: string | null;
       priority?: number;
+      // schedulePattern: cron expression for scheduled automation (e.g. '0 9 * * *')
+      schedulePattern?: string | null;
+      // scheduleTimezone: IANA timezone for the cron expression (e.g. 'Asia/Shanghai')
+      scheduleTimezone?: string | null;
     },
   ) => lambdaClient.task.update.mutate({ id, ...data });
 
@@ -77,17 +100,32 @@ class TaskService {
 
   clearAll = async () => lambdaClient.task.clearAll.mutate();
 
-  updateStatus = async (
-    id: string,
-    status: 'backlog' | 'canceled' | 'completed' | 'failed' | 'paused' | 'running',
-    error?: string,
-  ) => lambdaClient.task.updateStatus.mutate({ error, id, status });
+  updateStatus = async (id: string, status: TaskStatus, error?: string) =>
+    lambdaClient.task.updateStatus.mutate({ error, id, status });
 
   run = async (id: string, params?: { continueTopicId?: string; prompt?: string }) =>
     lambdaClient.task.run.mutate({ id, ...params });
 
-  addComment = async (id: string, content: string, opts?: { briefId?: string; topicId?: string }) =>
-    lambdaClient.task.addComment.mutate({ content, id, ...opts });
+  previewSubtaskLayers = async (id: string) => lambdaClient.task.previewSubtaskLayers.query({ id });
+
+  runReadySubtasks = async (id: string) => lambdaClient.task.runReadySubtasks.mutate({ id });
+
+  addComment = async (
+    id: string,
+    content: string,
+    opts?: {
+      authorAgentId?: string;
+      briefId?: string;
+      editorData?: unknown;
+      topicId?: string;
+    },
+  ) => lambdaClient.task.addComment.mutate({ content, id, ...opts });
+
+  deleteComment = async (commentId: string) =>
+    lambdaClient.task.deleteComment.mutate({ commentId });
+
+  updateComment = async (commentId: string, content: string, opts?: { editorData?: unknown }) =>
+    lambdaClient.task.updateComment.mutate({ commentId, content, ...opts });
 
   addDependency = async (
     taskId: string,
@@ -115,6 +153,10 @@ class TaskService {
   updateReview = async (...args: Parameters<typeof lambdaClient.task.updateReview.mutate>) =>
     lambdaClient.task.updateReview.mutate(...args);
 
+  updateVerifyConfig = async (
+    ...args: Parameters<typeof lambdaClient.task.updateVerifyConfig.mutate>
+  ) => lambdaClient.task.updateVerifyConfig.mutate(...args);
+
   runReview = async (id: string, params?: { content?: string; topicId?: string }) =>
     lambdaClient.task.runReview.mutate({ id, ...params });
 
@@ -130,6 +172,21 @@ class TaskService {
     lambdaClient.brief.resolve.mutate({ id, ...opts });
 
   markBriefRead = async (id: string) => lambdaClient.brief.markRead.mutate({ id });
+
+  // ── Transfer / Copy ──
+
+  transferTask = async (
+    taskId: string,
+    targetWorkspaceId: string | null,
+    targetVisibility?: 'private' | 'public',
+  ) => lambdaClient.task.transferTask.mutate({ targetVisibility, targetWorkspaceId, taskId });
+
+  copyTaskToWorkspace = async (
+    taskId: string,
+    targetWorkspaceId: string | null,
+    targetVisibility?: 'private' | 'public',
+  ) =>
+    lambdaClient.task.copyTaskToWorkspace.mutate({ targetVisibility, targetWorkspaceId, taskId });
 }
 
 export const taskService = new TaskService();

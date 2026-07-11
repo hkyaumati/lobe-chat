@@ -1,9 +1,12 @@
+import { AGENT_CHAT_URL } from '@lobechat/const';
 import { produce } from 'immer';
 
+import { getActiveWorkspaceId } from '@/business/client/hooks/useActiveWorkspaceId';
 import { INBOX_SESSION_ID } from '@/const/session';
-import { SESSION_CHAT_URL } from '@/const/url';
-import { type GlobalStore } from '@/store/global';
-import { type StoreSetter } from '@/store/types';
+import type { GlobalStore } from '@/store/global';
+import type { ModelDetailPanelExpandedKey, WorkingSidebarTab } from '@/store/global/initialState';
+import { readOverridableField } from '@/store/global/selectors/systemStatus';
+import type { StoreSetter } from '@/store/types';
 import { getStableNavigate } from '@/utils/stableNavigate';
 import { setNamespace } from '@/utils/storeDebug';
 
@@ -23,7 +26,7 @@ export class GlobalWorkspacePaneActionImpl {
   }
 
   switchBackToChat = (sessionId?: string): void => {
-    const target = SESSION_CHAT_URL(sessionId || INBOX_SESSION_ID, this.#get().isMobile);
+    const target = AGENT_CHAT_URL(sessionId || INBOX_SESSION_ID, this.#get().isMobile);
     getStableNavigate()?.(target);
   };
 
@@ -62,7 +65,11 @@ export class GlobalWorkspacePaneActionImpl {
 
   toggleExpandSessionGroup = (id: string, expand: boolean): void => {
     const { status } = this.#get();
-    const nextExpandSessionGroup = produce(status.expandSessionGroupKeys, (draft: string[]) => {
+    // Read the effective (overlay-aware) value so workspace-mode toggles compose
+    // off the workspace list, not the personal one underneath it.
+    const currentKeys =
+      readOverridableField(status, 'expandSessionGroupKeys', getActiveWorkspaceId()) ?? [];
+    const nextExpandSessionGroup = produce(currentKeys, (draft: string[]) => {
       if (expand) {
         if (draft.includes(id)) return;
         draft.push(id);
@@ -78,6 +85,30 @@ export class GlobalWorkspacePaneActionImpl {
     const showLeftPanel =
       typeof newValue === 'boolean' ? newValue : !this.#get().status.showLeftPanel;
     this.#get().updateSystemStatus({ showLeftPanel }, n('toggleLeftPanel', newValue));
+  };
+
+  toggleAgentBuilderPanel = (newValue?: boolean): void => {
+    const showAgentBuilderPanel =
+      typeof newValue === 'boolean' ? newValue : !this.#get().status.showAgentBuilderPanel;
+
+    this.#get().updateSystemStatus(
+      { showAgentBuilderPanel },
+      n('toggleAgentBuilderPanel', newValue),
+    );
+  };
+
+  togglePageAgentPanel = (newValue?: boolean): void => {
+    const showPageAgentPanel =
+      typeof newValue === 'boolean' ? newValue : !this.#get().status.showPageAgentPanel;
+
+    this.#get().updateSystemStatus({ showPageAgentPanel }, n('togglePageAgentPanel', newValue));
+  };
+
+  toggleTaskAgentPanel = (newValue?: boolean): void => {
+    const showTaskAgentPanel =
+      typeof newValue === 'boolean' ? newValue : !this.#get().status.showTaskAgentPanel;
+
+    this.#get().updateSystemStatus({ showTaskAgentPanel }, n('toggleTaskAgentPanel', newValue));
   };
 
   toggleMobilePortal = (newValue?: boolean): void => {
@@ -108,6 +139,19 @@ export class GlobalWorkspacePaneActionImpl {
     this.#get().updateSystemStatus({ showSystemRole }, n('toggleMobileTopic', newValue));
   };
 
+  setWorkingSidebarTab = (tab: WorkingSidebarTab): void => {
+    if (this.#get().status.workingSidebarTab === tab) return;
+    this.#get().updateSystemStatus({ workingSidebarTab: tab }, n('setWorkingSidebarTab', tab));
+  };
+
+  revealInFilesTab = (relativePath: string): void => {
+    this.#get().setWorkingSidebarTab('files');
+    this.#get().updateSystemStatus(
+      { workingSidebarRevealRequest: { nonce: Date.now(), path: relativePath } },
+      n('revealInFilesTab'),
+    );
+  };
+
   toggleWideScreen = (newValue?: boolean): void => {
     const noWideScreen =
       typeof newValue === 'boolean' ? !newValue : !this.#get().status.noWideScreen;
@@ -115,11 +159,11 @@ export class GlobalWorkspacePaneActionImpl {
     this.#get().updateSystemStatus({ noWideScreen }, n('toggleWideScreen', newValue));
   };
 
-  toggleZenMode = (): void => {
-    const { status } = this.#get();
-    const nextZenMode = !status.zenMode;
-
-    this.#get().updateSystemStatus({ zenMode: nextZenMode }, n('toggleZenMode'));
+  updateModelDetailPanelExpandedKeys = (keys: ModelDetailPanelExpandedKey[]): void => {
+    this.#get().updateSystemStatus(
+      { modelDetailPanelExpandedKeys: keys },
+      n('updateModelDetailPanelExpandedKeys', keys),
+    );
   };
 }
 

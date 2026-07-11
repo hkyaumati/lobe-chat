@@ -1,12 +1,19 @@
+import { BUILTIN_AGENT_SLUGS } from '@lobechat/builtin-agents';
+import { CUSTOM_DOCUMENT_FILE_TYPE } from '@lobechat/const';
+import type { ContextSelection, PageSelection } from '@lobechat/types';
+
+import { stableWorkspaceAwareNavigate } from '@/features/Workspace/stableWorkspaceAwareNavigate';
 import { chatGroupService } from '@/services/chatGroup';
 import { documentService } from '@/services/document';
 import { getAgentStoreState } from '@/store/agent';
 import { agentSelectors, builtinAgentSelectors } from '@/store/agent/selectors';
 import { getChatGroupStoreState } from '@/store/agentGroup';
 import { useChatStore } from '@/store/chat';
+import { useGlobalStore } from '@/store/global';
+import { useGroupProfileStore } from '@/store/groupProfile';
 import { type HomeStore } from '@/store/home/store';
 import { type StoreSetter } from '@/store/types';
-import { getStableNavigate } from '@/utils/stableNavigate';
+import { markdownToTxt } from '@/utils/markdownToTxt';
 import { setNamespace } from '@/utils/storeDebug';
 
 import { type StarterMode } from './initialState';
@@ -14,9 +21,31 @@ import { type StarterMode } from './initialState';
 const n = setNamespace('homeInput');
 
 interface SendMessageWithEditorParams {
+  contextSelections?: ContextSelection[];
   editorData?: Record<string, any>;
+  groupId?: string;
   message: string;
+  pageSelections?: PageSelection[];
+  workspaceSlug?: string | null;
 }
+
+/**
+ * Make sure a builtin agent (agent-builder / group-agent-builder / page-agent)
+ * is hydrated into both `builtinAgentIdMap` and `agentMap` before we read its
+ * id and call sendMessage. Without this, the create-Agent / create-Group /
+ * create-Page flows can race against the host page's `useInitBuiltinAgent`:
+ * `builtinAgentIdMap[slug]` is still undefined, so sendMessage gets
+ * `agentId: undefined` and silently early-returns. Symptom: navigation lands
+ * on the builder page but the conversation never starts.
+ */
+const ensureBuiltinAgentHydrated = async (slug: string): Promise<string | undefined> => {
+  const state = getAgentStoreState();
+  const cachedId = state.builtinAgentIdMap[slug];
+  if (cachedId && state.agentMap[cachedId]) return cachedId;
+
+  await state.refreshBuiltinAgent(slug);
+  return getAgentStoreState().builtinAgentIdMap[slug];
+};
 
 type Setter = StoreSetter<HomeStore>;
 export const createHomeInputSlice = (set: Setter, get: () => HomeStore, _api?: unknown) =>
@@ -36,7 +65,14 @@ export class HomeInputActionImpl {
     this.#set({ inputActiveMode: null }, false, n('clearInputMode'));
   };
 
-  sendAsAgent = async ({ editorData, message }: SendMessageWithEditorParams): Promise<string> => {
+  sendAsAgent = async ({
+    contextSelections,
+    editorData,
+    groupId,
+    message,
+    pageSelections,
+    workspaceSlug,
+  }: SendMessageWithEditorParams): Promise<string> => {
     this.#set({ homeInputLoading: true }, false, n('sendAsAgent/start'));
 
     try {
@@ -56,12 +92,32 @@ export class HomeInputActionImpl {
           model,
           provider,
           systemRole: message,
-          title: message?.slice(0, 50) || 'New Agent',
+          title: markdownToTxt(message ?? '').slice(0, 50) || 'New Agent',
         },
+        groupId,
       });
 
+      // Sync the editing target into the chat store BEFORE the builder message
+      // is sent. Gateway mode reads `chatStore.activeAgentId` at send time to
+      // forward `editingAgentId` (see gateway.ts executeGatewayAgent), and the
+      // AgentBuilder tool `onAfterCall` reads it to refresh the correct agent's
+      // config. Setting it here — instead of waiting for AgentBuilderProvider's
+      // mount effect — removes the create-time race where the first tool call
+      // could target / refresh the wrong agent (left profile not refreshed).
+      if (result.agentId) {
+        useChatStore.setState(
+          { activeAgentId: result.agentId },
+          false,
+          'sendAsAgent/syncEditingAgentId',
+        );
+      }
+
+      if (message.trim()) {
+        useGlobalStore.getState().toggleAgentBuilderPanel(true);
+      }
+
       // 3. Navigate to Agent profile page
-      getStableNavigate()?.(`/agent/${result.agentId}/profile`);
+      stableWorkspaceAwareNavigate(`/agent/${result.agentId}/profile`);
 
       // 4. Refresh agent list
       this.#get().refreshAgentList();
@@ -69,18 +125,29 @@ export class HomeInputActionImpl {
       // 5. Update agentBuilder's model config and send initial message
       if (result.agentId) {
         const { sendMessage } = useChatStore.getState();
-        const agentBuilderId = builtinAgentSelectors.agentBuilderId(agentState);
+        // Ensure agentBuilder is loaded before reading its id — the host
+        // AgentBuilder component's useInitBuiltinAgent only fires after this
+        // navigation completes, which would otherwise race with sendMessage.
+        const agentBuilderId = await ensureBuiltinAgentHydrated(BUILTIN_AGENT_SLUGS.agentBuilder);
 
         // Update agentBuilder's model to match inbox selection
         if (agentBuilderId && model && provider) {
           await agentState.updateAgentConfigById(agentBuilderId, { model, provider });
         }
 
-        await sendMessage({
-          context: { agentId: agentBuilderId!, scope: 'agent_builder' },
-          editorData,
-          message,
-        });
+        if (agentBuilderId) {
+          await sendMessage({
+            context: {
+              agentId: agentBuilderId,
+              scope: 'agent_builder',
+              ...(workspaceSlug ? { workspaceSlug } : {}),
+            },
+            contextSelections,
+            editorData,
+            message,
+            pageSelections,
+          });
+        }
       }
 
       // 6. Clear mode
@@ -92,7 +159,14 @@ export class HomeInputActionImpl {
     }
   };
 
-  sendAsGroup = async ({ editorData, message }: SendMessageWithEditorParams): Promise<string> => {
+  sendAsGroup = async ({
+    contextSelections,
+    editorData,
+    groupId,
+    message,
+    pageSelections,
+    workspaceSlug,
+  }: SendMessageWithEditorParams): Promise<string> => {
     this.#set({ homeInputLoading: true }, false, n('sendAsGroup/start'));
 
     try {
@@ -111,7 +185,8 @@ export class HomeInputActionImpl {
         config: {
           systemPrompt: message,
         },
-        title: message?.slice(0, 50) || 'New Group',
+        groupId,
+        title: markdownToTxt(message ?? '').slice(0, 50) || 'New Group',
       });
 
       // 3. Load groups and refresh
@@ -121,11 +196,18 @@ export class HomeInputActionImpl {
       // 4. Refresh sidebar agent list
       this.#get().refreshAgentList();
 
-      // 5. Navigate to Group profile page
-      getStableNavigate()?.(`/group/${group.id}/profile`);
+      if (message.trim()) {
+        useGroupProfileStore.getState().setChatPanelExpanded(true);
+      }
 
-      // 6. Update groupAgentBuilder's model config and send initial message
-      const groupAgentBuilderId = builtinAgentSelectors.groupAgentBuilderId(agentState);
+      // 5. Navigate to Group profile page
+      stableWorkspaceAwareNavigate(`/group/${group.id}/profile`);
+
+      // 6. Update groupAgentBuilder's model config and send initial message.
+      // Hydrate first so we don't race with the group profile page's own init.
+      const groupAgentBuilderId = await ensureBuiltinAgentHydrated(
+        BUILTIN_AGENT_SLUGS.groupAgentBuilder,
+      );
 
       if (groupAgentBuilderId) {
         // Update groupAgentBuilder's model to match inbox selection
@@ -135,9 +217,15 @@ export class HomeInputActionImpl {
 
         const { sendMessage } = useChatStore.getState();
         await sendMessage({
-          context: { agentId: groupAgentBuilderId, scope: 'group_agent_builder' },
+          context: {
+            agentId: groupAgentBuilderId,
+            scope: 'group_agent_builder',
+            ...(workspaceSlug ? { workspaceSlug } : {}),
+          },
+          contextSelections,
           editorData,
           message,
+          pageSelections,
         });
       }
 
@@ -158,7 +246,13 @@ export class HomeInputActionImpl {
     this.#set({ inputActiveMode: null }, false, n('sendAsResearch'));
   };
 
-  sendAsWrite = async ({ editorData, message }: SendMessageWithEditorParams): Promise<string> => {
+  sendAsWrite = async ({
+    contextSelections,
+    editorData,
+    message,
+    pageSelections,
+    workspaceSlug,
+  }: SendMessageWithEditorParams): Promise<string> => {
     this.#set({ homeInputLoading: true }, false, n('sendAsWrite/start'));
 
     try {
@@ -175,15 +269,16 @@ export class HomeInputActionImpl {
       // 2. Create new Document
       const newDoc = await documentService.createDocument({
         editorData: '{}',
-        fileType: 'custom/document',
-        title: message?.slice(0, 50) || 'Untitled',
+        fileType: CUSTOM_DOCUMENT_FILE_TYPE,
+        title: markdownToTxt(message ?? '').slice(0, 50) || 'Untitled',
       });
 
       // 3. Navigate to Page
-      getStableNavigate()?.(`/page/${newDoc.id}`);
+      stableWorkspaceAwareNavigate(`/page/${newDoc.id}`);
 
-      // 4. Update pageAgent's model config and send initial message
-      const pageAgentId = builtinAgentSelectors.pageAgentId(agentState);
+      // 4. Update pageAgent's model config and send initial message. Hydrate
+      // first to avoid the same race the agent/group flows hit.
+      const pageAgentId = await ensureBuiltinAgentHydrated(BUILTIN_AGENT_SLUGS.pageAgent);
 
       if (pageAgentId) {
         // Update pageAgent's model to match inbox selection
@@ -193,9 +288,20 @@ export class HomeInputActionImpl {
 
         const { sendMessage } = useChatStore.getState();
         await sendMessage({
-          context: { agentId: pageAgentId, scope: 'page' },
+          // Pass the freshly created document id explicitly. The new PageEditor
+          // has not mounted yet, so the page editor runtime singleton may still
+          // be bound to the previously open document — relying on its fallback
+          // here would scope server-side PageAgent tools to the wrong document.
+          context: {
+            agentId: pageAgentId,
+            documentId: newDoc.id,
+            scope: 'page',
+            ...(workspaceSlug ? { workspaceSlug } : {}),
+          },
+          contextSelections,
           editorData,
           message,
+          pageSelections,
         });
       }
 
